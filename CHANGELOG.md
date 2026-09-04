@@ -205,10 +205,10 @@ For full historical detail (Dec 2025 – April 2026), see [docs/CHANGELOG_ARCHIV
   6,634 / 6,205 (MODIS) and 5,454 / 5,007 (NLCD). Related, also fixed in the R3 README:
   its `zfill(8) if len <= 8` recipe for the zero-stripped metadata ids loses 57 / 29
   product gages (66 of the 8,014 compiled gages) for the same reason — replaced with
-  strip-leading-zeros-on-both-sides. The draft §5.1.3 join text in
-  `docs/plans/2026-09-04-dataset-join-guidance.md` §4 was revised to the
-  strip-on-both-sides wording the same day; still to relay: manuscript §3 "all tables
-  join on gage_id, the zero-padded …" needs the same qualification.
+  strip-leading-zeros-on-both-sides. Still to relay: manuscript §3 "all tables join on
+  gage_id, the zero-padded …" and the draft §5.1.3 join text in
+  `docs/plans/2026-09-04-dataset-join-guidance.md` §4 (written assuming a re-pad) need
+  the same strip-on-both-sides wording.
 - **ACCEPTED DIVERGENCE (rpkg vs Julia, 1 annual row in 18.9M) — the storage
   distinct-value guard and signed zeros.** `julia/src/storage.jl` gates a year on
   `length(unique(Q_valid)) < 10`, and Julia's `unique` uses `isequal`, under which
