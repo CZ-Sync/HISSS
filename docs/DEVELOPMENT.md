@@ -751,6 +751,8 @@ python docs/benchmarks/build_experiment_vs_julia_dashboard.py startIn1993_80pct
 | `docs/benchmarks/run_julia_benchmark_prod_1980_2025_60pct_drought.jl` | **STANDARD PRODUCT #2** wrapper — WY 1980-2025 @ 60% with the drought family (run 2026-08-11; defaults to the rebuilt climate parquet) |
 | `docs/benchmarks/check_additivity.jl` | Proves a run ADDED columns without changing pre-existing ones (column/gage set, per-gage value identity, population gate) |
 | `docs/benchmarks/analyze_drought_redundancy.jl` | Measures drought-duration overlap with the pulse metrics on the annual series |
+| `docs/benchmarks/run_batched_julia.py` | Runs a Julia benchmark wrapper in gage batches to bound memory on the 16 GB laptop: `split` the inputs (source sha256 recorded), `run` each batch under a memory and time guard, `merge` (refuses incomplete or inconsistent batches; reference gage order, else sorted by id) |
+| `docs/benchmarks/selftest_run_batched_julia.py` | Self-test of the batched runner on synthetic inputs with a fake julia (split, resume, guards, merge refusals) |
 | `docs/benchmarks/convert_daymet_csvs_to_parquet.py` | Rebuilds `daymet_1980_2023.parquet` from the 44 annual Daymet CSVs (Python equivalent of the R `convert_daymet_zip_to_parquet()`) |
 | `docs/benchmarks/comparison_report.md` | Generated comparison report |
 | `docs/benchmarks/julia_vs_golden_r_summary.md` | Generated Julia vs Golden R detailed report |
@@ -856,6 +858,7 @@ signatures instead (see DECISION above).
 | `combined_streamflow_data_09feb2026.parquet` | `D:/processedOuts_feb2026/` | Feb 2026 | Current streamflow parquet with bug fixes. 111,624,189 rows / 8,014 gages, **858 MiB** (899,935,349 B) |
 | `combined_watershed_metadata_09feb2026.csv` | `D:/processedOuts_feb2026/` | Feb 2026 | Corresponding metadata, 2.1 MiB |
 | **`daymet_1980_2023_rebuilt_10aug2026.parquet`** | `D:/processedOuts_feb2026/` | Aug 2026 | **USE THIS** for climate (PPT, temp, SWE). 97,757,220 rows / 6,087 sites / WY-covering CY 1980–2023, **3.76 GiB** (4,040,997,608 B). Rebuilt from the annual CSVs after the original was truncated — see below |
+| `daymet_1980_2025_29sep2026.parquet` | drive `daymet-processed-29sep2026/` (run folder `~/HISSS_data/daymet-processed-29sep2026/` on the MacBook) | Sep 2026 | Reprocessed Daymet V4 R1 input, **not used by any product until the user's rerun decision**. 134,605,430 rows / 8,017 basins / calendar 1980–2025, columns `site_id, Date, prcp, tmin, tmax, swe, vp, srad`, no NaN; **4.78 GiB** (5,134,193,404 B), md5 `c059076088cd8abd963c64094468e90f`. Companion `daymet_basin_flags.csv` flags 101 questionable basins. See `EO_data_processing/README_DAYMET.md` |
 | `daymet_1980_2023/` (44 annual CSVs) | `D:/` (drive root) | Jan 2026 | **Source of record** for Daymet: `site_id, month, year, prcp, tmin, tmax, swe, vp, srad`; no day column. 10,825,714,689 B = 10.08 GiB total, ~234.6 MiB/yr. Rebuild the parquet with `docs/benchmarks/convert_daymet_csvs_to_parquet.py` |
 
 > ⚠️ **`daymet_1980_2023.parquet` (the canonical name) is TRUNCATED and unreadable** —
