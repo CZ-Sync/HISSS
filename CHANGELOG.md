@@ -24,11 +24,12 @@ loads every session is `docs/STATUS.md`.
 
 ### Planned
 - **Climate on Daymet's own dates — the fix for the streamflow-frame Known Issue (found
-  2026-10-16) — ON HOLD pending discussion with the research team (user decision,
-  2026-10-16).** Scope when approved: outer join in the three runners, Julia first; gate:
-  every Q-only column bit-identical (`check_additivity.jl --expect-added 0`); then rerun
-  both version-2 products (the 1,172 gage-years with absent streamflow dates change in the
-  PPT/TMIN/TMAX/SWE-derived families). Design: `docs/plans/2026-10-16-precipitation-review.md` §5.
+  2026-10-16) — APPROVED 2026-10-26 (user with the research team; plan decision 5 reversed)
+  and folded into the qualifier rerun.** The runner-level fix is IMPLEMENTED (Phase A′,
+  2026-10-26, [October 2026]): `docs/benchmarks/climate_frame.{jl,py,R}` behind
+  `STREAMFLOW_CLIMATE_FRAME = left | outer`, default `left` until the products land; the
+  products themselves (stage S2 of plan §10.4) are pending with Phases B–D. Design:
+  `docs/plans/2026-10-16-precipitation-review.md` §5 and the rerun plan §10.
 - **Daymet climate input: the product-rerun decision is PENDING (NEXT).** The reprocessed
   input `daymet_1980_2025_29sep2026.parquet` (8,017 basins, calendar 1980–2025, no NaN) was
   built 2026-09-30 and adversarially reviewed 2026-10-01. On the 5,965 basins with stale
@@ -152,9 +153,15 @@ loads every session is `docs/STATUS.md`.
   **DECISIONS (user, 2026-10-26): every default of plan v3 approved** (restore `R`, `<`, `>`,
   `[4]` with the censored bounds kept as values; provisional-remark days out of scope; splice as a
   patched snapshot with ledger, raw responses and the three-dataset control; gage sets frozen;
-  the climate outer-join fix stays out; internal v3 / public "version 2"; metadata updated in
-  place; rpkg re-baseline; code reviews by area; local staging; start now) — implementation
-  pending. Measurement: census §10.1
+  the climate outer-join fix stays out — REVERSED the same day, folded in; internal v3 / public
+  "version 2"; metadata updated in place; rpkg re-baseline; code reviews by area; local staging;
+  start now). **Phase A DONE 2026-10-26**: the ingestion rule is fixed (`R/usgs_qualifiers.R`,
+  [October 2026]). **Phases B–D DONE 2026-10-28**: the compiled parquet is patched (every one
+  of the 193,542 target days restored from re-fetched NWIS records, ledger + raw responses +
+  audit B1–B8 PASS) and both products are rebuilt as version 3 with the gage sets frozen —
+  1,177 / 950 water years restored exactly as the oracle forecast, change census 0 unexplained
+  (plan §11, [October 2026]). NOT yet deposited: the public resources still carry the masked
+  values. Measurement: census §10.1
   (`docs/plans/2026-09-04-filtering-stage-census.md`); tools
   `docs/benchmarks/min_flow_rule_footprint.py`, `min_flow_rule_replay.py`.
 - **MEDIUM (every product, found 2026-10-16 by the Pacific-coast precipitation review) —
@@ -186,7 +193,12 @@ loads every session is `docs/STATUS.md`.
   must stay bit-identical; `check_additivity.jl` is the gate) — Julia first, then the
   ports, then a rerun of both version-2 products. **DECISION (user, 2026-10-16): documented
   for future work; the fix is NOT implemented until it has been discussed with the research
-  team.** Record and evidence: `docs/plans/2026-10-16-precipitation-review.md`;
+  team.** REVERSED 2026-10-26 (user, after the research-team discussion): the fix is folded into
+  the qualifier rerun — Phase A′ `climate_frame.{jl,py,R}` + `STREAMFLOW_CLIMATE_FRAME=outer`
+  (a span-restricted outer join inside each gage's original water-year set), and both products
+  are rebuilt as version 3 on 2026-10-27 (3,241 / 2,221 Daymet days inserted in valid years on
+  874 / 734 gages; every precipitation and GDD total equals its daily sum, gate 5b; plan §10 /
+  §11). NOT yet deposited. Record and evidence: `docs/plans/2026-10-16-precipitation-review.md`;
   `~/HISSS_data/climate-rerun-12oct2026/precip_review_16oct2026/` (scripts +
   `full_domain_prcp_check.parquet`, one row per product gage-year).
 - **Explorers and dashboards built before 2026-10-13 show CARTO's "API KEY REQUIRED"
@@ -350,6 +362,161 @@ Moved 2026-09-29 to `docs/reconciliation/guidelines_todos.md` and
 ---
 
 ## [October 2026]
+
+### Qualifier rerun — Phases A–H: the USGS acceptance rule, the climate-frame switch, the version-3 products built and verified (2026-10-26 … 2026-10-28)
+
+Plan `docs/plans/2026-10-21-qualifier-mask-fix-rerun-plan.md` v6; decisions 12–19 taken as
+their defaults when the user said to proceed (2026-10-26). Nothing in `julia/src`,
+`python/streamflow_signatures` or `rpkg/R` changed.
+- **Phase A — the rule (HIGH Known Issue, code side).** `R/usgs_qualifiers.R` holds the
+  pure acceptance rule of decision 1d — status letter `A` or `P` as the first token of the
+  qualifier string, a finite value, not the NWIS no-data sentinel (−999999); remark codes
+  (`e`, `R`, `<`, `>`, `[4]`, `Ice`, …) never mask at storage and stay verbatim in `flag` —
+  and `generate_streamflow_dt` (`R/helperFunctions.R`) applies it in place of
+  `keep_codes <- c("A", "A e", "P", "P e")`. Two deliberate behaviour changes besides the
+  restored approved codes: a kept-code day served with the sentinel is NA now (the old
+  rule tested the code only), and provisional-remark days with a value are kept by the
+  rule going forward (decision 1e keeps them OUT of this patch — the splice tool restores
+  the four approved codes only). Test `R/tests/test_qualifier_codes.R` (37 checks; an
+  integration check of `generate_streamflow_dt` on a stubbed NWIS frame runs where
+  lubridate is installed). `config.R`'s `MIN_Q_VALUE_AND_DAYS` comment corrected (the rule
+  never set values to NA); `docs/DEVELOPMENT.md`, `docs/DATA_SOURCES.md`, census §10.1 and
+  the user skill updated. The R3 input-dictionary `flag` row is rewritten with the
+  restaging (Phase H).
+- **Phase A′ — the climate frame (MEDIUM Known Issue, runner side).** One helper per
+  language, `frame_with_climate(gage_df, gage_climate, mode)` in
+  `docs/benchmarks/climate_frame.{jl,py,R}`, used by the production join of the three
+  runners under `STREAMFLOW_CLIMATE_FRAME = left | outer` (runtime; recorded as
+  `provenance.climate_frame` in the timing JSON and shared across batches by
+  `run_batched_julia.py merge`). `left` is the former join expression, verbatim; `outer`
+  adds the gage's Daymet rows on dates with no streamflow row, restricted to the record
+  span AND the water years that hold a streamflow row (Codex round 3), with identical
+  duplicate climate rows collapsed and conflicting ones an error, and both date columns
+  asserted to be calendar dates. The Julia production join's broad `catch` is narrowed to
+  "no climate for this gage": a helper or join failure now aborts the run instead of
+  masquerading as missing climate. The deprecated legacy branches keep their left joins
+  (rpkg passes `left` explicitly when `use_legacy`). Default `left` until the rerun's
+  products land (then `outer`, Phase H). Verification: fixture self-tests
+  `selftest_climate_frame.{jl,py,R}` (one synthetic gage with absent storm days, a whole
+  absent interior water year, the Dec 31 neighbour, the 30-absent-day and 4-day-gap
+  eligibility flips, a record starting and ending mid-year; Julia 40 checks, Python 37, R 42:
+  Q-only preprocessor outputs and the Q-only orchestrator output bit-identical between
+  modes, the runner's `total_possible` identical, `prcp_annual` in `outer` = the Daymet
+  water-year sum, annual values of all three languages within 1e-9 in both modes, summaries
+  within 1e-6 with gate state always compared and numeric rank statistics on tie-bearing
+  series reported after proving the port reproduces Julia's statistics on Julia's values);
+  the production wrapper on a 40-gage subset (30 join-affected) and on the whole batch 1 of
+  product #1 (824 gages) in `left` mode reproduces the version-2 product bitwise
+  (`check_additivity.jl --expect-added 0` PASS); `outer` on the subset moves 599 of 2,276
+  columns, every one in a climate-dependent family. Blind reviews: Sonnet GO WITH CHANGES
+  (shared provenance key, Date assertion, edge-case tests — applied) and Codex NO-GO
+  (duplicate climate dates, inconsistent date normalisation, the tie exemption hiding a
+  gate-state difference, the untested window denominator, the rpkg legacy branch, R's
+  `year` / `doy` on added rows — all applied and re-tested; batch-manifest provenance goes
+  with Phase C). Unit suites unchanged: Julia all pass, pytest 177 passed.
+- **Phase C — harness (2026-10-26, same day).** `run_batched_julia.py`: `split --gage-list`
+  (the selection manifest of decision 3 — only listed gages are split, every listed id must
+  exist, path / sha256 / counts in `batches.json`), `run --climate-frame`, `--qa-schema`,
+  `--stage`, `--parent-manifest`, `--require-clean-tree` (a product run refuses a dirty or
+  unknown tree), a resume FINGERPRINT per batch (git revision and dirty state, Julia version,
+  `julia/Manifest.toml`, config, metadata, wrapper and the batch's own two input files, all
+  sha256, plus the stage, parent manifest, selection and resolved climate frame — a done
+  batch is skipped only when command, environment and fingerprint are unchanged), `merge
+  --qa-schema` (every batch header must equal the pinned full-product header, not only each
+  other's), `climate_frame` in the shared provenance, and the fingerprint / stage / selection
+  in the merged timing JSON (self-test 28 / 28). The three runners read
+  `STREAMFLOW_QA_SCHEMA=<full-product CSV>`: every column of that header absent from the run
+  is added as missing before the QA flags, so a subset stage's `flagged_for_high_na`
+  denominator equals the product's (a run emitting a column outside the header is refused;
+  on the 40-gage subset the header is the 2,277-column product header and the flag equals
+  version 2's). `validate_production_run.py --expect-same-gages` (exact gage set and equal
+  immutable site attributes incl. the human-interference columns);
+  `audit_qualification.jl` gains the frozen-cohort contract `emitted = selected ⊆ qualified`
+  (`STREAMFLOW_AUDIT_GAGE_LIST` / `_CENSUS` / `_WINDOW`, would-qualify gages listed, never
+  added); `run_rpkg_acceptance_gates.sh` parameterized (`DIR`, `REF`, `PORT`, `EXPECT_COLS`,
+  `ANNUAL_TOL`, `ANNUAL_WAIVERS`). New tools: `qualifier_year_oracle.py` (the full-calendar
+  replay of the preprocessor's year rules and the runners' qualification rule — on the
+  February parquet it reproduces every one of the 322,563 census year statuses and every
+  window decision of `qualification_census.jl`; `oracle` builds the acceptance oracle from
+  the base parquet + the splice ledger), `splice_nwis_qualifiers.py` (`list` reproduces the
+  census footprint exactly — 193,542 splice days / 987 gages, 15,257 provisional-remark days,
+  1,185 masked gages, 12,103 no-code rows; `fetch`, `splice`, `control`, `audit`),
+  `climate_frame_inventory.py` (the inserted-row inventory, B′ 1b) and the dependency
+  registry `docs/qualifier_rerun_registry.csv` (139 bases + 21 scalars: climate class, year-local
+  vs record-dependent, emission and trend gates, validation route). Deferred from Phase C
+  with a stated reason: the whole-table readers of `validate_annual_values.py` and
+  `check_annual_parquet_equality.py` are kept (they validated the 34.7 M-row product on this
+  machine on 2026-10-13); the staging tool's qualifier-release mode moves to Phase H, where
+  the audit and comparison outputs it templates from exist.
+- **B′ / E7 / E8 tooling (2026-10-26, same day).** `preprocess_state_ledger.py` (per-stage
+  replay of the preprocessor on the production frame → daily raw / preprocessed series and
+  the per-year state tables; `diff` → the daily delta ledger with causes and the state-table
+  changes), `assess_rerun_changes.py` (the change census: classes U / A-Q / A-J / A-QJ, the
+  keyed annual diff in duckdb, every changed cell explained against the registry or
+  UNEXPLAINED, the magnitude census incl. the 695 p-value crossings, gates incl. 5b),
+  `build_stage_cohorts.py` (S1 / S1′ manifests from the realized ledgers) and
+  `check_summary_equality.py` (the E7 summary gate: cell for cell, gate state always; tie-bearing
+  rank statistics and propagated annual residuals reported by name). On the 40-gage subset
+  (`outer` vs version 2): 1,810 changed annual cells, 0 unexplained, 44 `prcp_annual` deltas =
+  the summed daily PPT deltas; the realized inserted-row inventory equals the join forecast
+  on the product gage-years (1,174 / 857 / 3,183 and 937 / 721 / 2,195 — the forecast's
+  938th gage-year has only a Daymet-missing Dec 31 absent). E7 dry run (Python vs Julia on
+  the subset): identical annual values except one `D40_day` threshold tie; the summary gate
+  passes with ONE named column waiver, `ice_affected_days_total` — the Python port counts ice
+  days from `flag` (23 at 01011000) while canonical Julia emits 0 for every gage (the
+  standing Known Issue; recorded here as a cross-language divergence of that scalar).
+- **Codex tooling review (2026-10-26, NO-GO → applied).** Five blockers and nine majors in the
+  new tools — false B4 / B6 audit failures, an audit that did not close the source → ledger →
+  output identity, a splice that restored any finite value whatever today's status letter, a
+  fetch resume blind to the request window, an oracle tolerant of an unconsumed ledger and
+  ±Inf, a census whose "ALL GATES PASS" covered permissions only (5c–5g not run), a delta
+  attribution that accepted a corrupted interpolate, a batch fingerprint missing inputs —
+  all verified, fixed and re-tested (plan §11 for the item-by-item record). The census now
+  reports every §10.5 gate as PASS / FAIL / NOT RUN and is PASS only when all passed; the
+  reviewer's +123 injection fails it through the E7 gates. A Sonnet round-2 review of the
+  reworked tools (GO WITH CHANGES) re-derived every ledger value independently and added the
+  per-gage B2 identity, the E7 verdict binding, the field-by-field state attribution and a
+  2-hour B8 loop fix (plan §11). Codex round 2 reconfirmed the Phase B data independently
+  (GO WITH CHANGES) and found two further blockers and eleven majors in the verification
+  tooling (NO-GO for Phase D on it) — all applied the same evening except the two items
+  that need either the library's gate counters or the S1 / S1′ decision (plan §11). A final
+  scope-discipline review (user request): the input patch and the production code change are
+  within the two intended facets — verified independently in full — and the claim that every
+  output change follows from them physically awaits the products (S2); three reporting
+  corrections applied (the 96 provisional-today restored values named; the sensitivity count
+  79, not 87; numerical-only differences separated from substantive ones).
+  DECISION (user, 2026-10-26): B checkpoint APPROVED — the tree is committed as the tagged
+  baseline `qualifier-rerun-baseline-2026-10-26` and Phase D starts; the S1 / S1′ attribution
+  stages are KEPT. A product-#1 preview and an internal min / max / mean review summary were
+  built for the user's data review only (run folder `preview_1993_2025/`, `review_<WU>/`; not
+  published).
+- **Phases D–H executed (2026-10-26 … 2026-10-28).** Consolidated record:
+  `docs/plans/2026-10-21-qualifier-rerun-results.md`; dated log with every defect and review
+  disposition: plan §11; run folder `~/HISSS_data/qualifier-rerun-26oct2026/` (`README.md` there).
+  - D: S0 = version 2 bitwise on both windows (decision 18); the version-3 products built from
+    the clean worktree of the tag — #1 6,678 gages / 27,766,578 annual rows, #2 6,250 /
+    34,813,881 — E1–E4 PASS; B′ delta ledgers complete (2,702,639 / 2,217,736 attributed daily
+    values); change census vs version 2 **PASS on both windows** (0 unexplained of 387,055 /
+    360,065 non-equal annual cells; 5,069 / 4,894 untouched gages identical; 1,177 / 950 water
+    years restored, 0 lost); E7 Python port on the 1,609 / 1,356 changed gages PASS with named
+    residuals; the S1 / S1′ / class-U stage identities hold, the interaction residual is
+    reported. Six verification-tool defects fixed post-tag in the main tree (none in the products;
+    results record §5) — `assess_rerun_changes.py`, `preprocess_state_ledger.py`,
+    `check_summary_equality.py --allow-gate-state-column` (new), `stage_attribution.py` (new).
+  - E6: explorers for both products, basemap check PASS.
+  - F: rpkg re-baselined on #1 v3 — 0 errors, schema and failure gates PASS, annual 1e-6 PASS with
+    the same named residuals as version 2, climate family bit-identical, R² 0.999922
+    (`docs/CROSS_LANGUAGE_STATUS.md`).
+  - G round 1: three blind reviews (Sonnet 5.5 ×2, Codex) GO WITH CHANGES, no blocker; headline
+    numbers reproduced independently; every finding applied the same day
+    (`docs/plans/2026-10-21-qualifier-reviews/README.md`).
+  - H (local): `stage_hydroshare_qualifier_v3.py` (new) + `reconstruct_qualifier_patched_streamflow.py`
+    (new) stage R1 / R2 / R3 in `~/Downloads/Signatures_v3_28oct2026/` under the public name
+    "version 2" — frozen selection manifests, would-qualify lists, the validation record, the
+    corrected streamflow table beside the immutable February compile with ledger, raw responses,
+    control report, oracle and an executable reconstruction recipe (verified); `check` PASS. Not
+    uploaded. Version-3 docs: README, STATUS, DEVELOPMENT, DATA_SOURCES, CROSS_LANGUAGE_STATUS, the
+    user skill, `python/README.md`, the reconciliation logs (co-author relays).
 
 ### Reviewed: what the compilation's flow rule removed; the `A R` qualifier mask found (2026-10-21)
 
