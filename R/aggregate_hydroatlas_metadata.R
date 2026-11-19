@@ -7,9 +7,9 @@
 # Hybrid aggregation (see docs/plans + CHANGELOG):
 #   * Rule 1 (passthrough): attributes that HydroATLAS already accumulates over
 #     the full upstream catchment (_u variants) or routes to the pour point
-#     (_p, e.g. discharge) are taken AS-IS from the gage's outlet basin. The
-#     delineated upstream member set equals the extent HydroATLAS accumulates
-#     into the outlet basin's _u fields, so this is the rigorous watershed value.
+#     (_p, e.g. discharge) are taken AS-IS from the gage's outlet basin (the
+#     level-12 subbasin containing the gage). The delineated upstream member set
+#     equals the extent HydroATLAS accumulates into that basin's _u fields.
 #   * Rule 2 (drop): local _s attributes that have a _u twin are dropped (the
 #     _u value from Rule 1 supersedes them).
 #   * Rule 3 (manual): _s-only attributes are aggregated across the member
@@ -21,6 +21,11 @@
 #       - area-weighted majority for categorical class fields
 #         (glc/pnv/wet recomputed from the outlet's upstream _u fractions;
 #          the rest by area-weighted mode of the _smj code).
+#   * Containing-subbasin rule (user decisions 2026-11-19, section 5b): a gage whose
+#     containing subbasin is NOT a HydroBASINS headwater and is more than 1.5 x the
+#     gage's official (agency) polygon area gets that subbasin ALONE -- its own _s
+#     values, NA where HydroATLAS has no subbasin-level value. Record:
+#     docs/plans/2026-11-19-hydroatlas-outlet-review/.
 #
 # This is metadata/ingestion code (R domain). It is NOT a cross-language
 # signature and intentionally lives outside rpkg/ (which mirrors Julia
@@ -36,9 +41,10 @@
 
 suppressMessages({
   library(data.table)
-  library(sf)
   library(arrow)
 })
+# sf is needed only by map_gages_to_outlets() (sf:: calls); the containing-subbasin rule runs without it.
+if (requireNamespace("sf", quietly = TRUE)) suppressMessages(library(sf))
 
 options(scipen = 999)  # never write HYBAS_IDs in scientific notation
 
@@ -126,8 +132,14 @@ classify_hydroatlas_attributes <- function(field_names) {
     pnv_cl_smj = sprintf("pnv_pc_u%02d", 1:15)
   )
   maj_all <- rule_table[rule == "majority", attribute]
+  pass <- rule_table[rule == "passthrough", attribute]
+  # subbasin (_s) twin of each passthrough field, for the containing-subbasin rule; NA where HydroATLAS has
+  # no subbasin-level version (lkv/rev _usu sums and the four _p pour-point fields)
+  twin <- ifelse(grepl("^[a-z]{3}_[a-z0-9]{2}_u", pass), sub("^([a-z]{3}_[a-z0-9]{2})_u", "\\1_s", pass), NA_character_)
+  twin[!twin %in% rule_table$attribute] <- NA_character_
   list(
-    pass     = rule_table[rule == "passthrough", attribute],
+    pass     = pass,
+    pass_twin = stats::setNames(twin, pass),
     wmean    = rule_table[rule == "wmean", attribute],
     min      = rule_table[rule == "min", attribute],
     max      = rule_table[rule == "max", attribute],
@@ -220,7 +232,10 @@ load_hydroatlas_attributes <- function(HB_dt, member_ids, attr_cols, cache_path 
 # =============================================================================
 # 5. AGGREGATION  (per UNIQUE outlet; O(1) keyed member slices)
 # =============================================================================
-aggregate_one_outlet <- function(outlet, members, attr_dt, cg) {
+#' local_only = TRUE is the containing-subbasin rule (section 5b): the outlet basin ALONE, with every attribute
+#' taken from its own subbasin (_s) value; passthrough fields with no _s version are NA.
+aggregate_one_outlet <- function(outlet, members, attr_dt, cg, local_only = FALSE) {
+  if (local_only) members <- outlet
   sub  <- attr_dt[.(members), nomatch = NULL]
   w    <- as.numeric(sub$SUB_AREA)
   orow <- sub[hybas_chr == outlet]
@@ -237,17 +252,33 @@ aggregate_one_outlet <- function(outlet, members, attr_dt, cg) {
 
   # Rule 1: passthrough from the outlet basin
   if (length(cg$pass)) {
-    if (nrow(orow)) res[cg$pass] <- as.list(orow[, cg$pass, with = FALSE])
-    else            res[cg$pass] <- NA_real_
+    if (!nrow(orow)) {
+      res[cg$pass] <- NA_real_
+    } else if (!local_only) {
+      res[cg$pass] <- as.list(orow[, cg$pass, with = FALSE])
+    } else {
+      # containing-subbasin rule: the basin's own _s twin of each _u field (-9999 NoData -> NA);
+      # fields without a subbasin-level version -> NA
+      for (pc in cg$pass) {
+        tw <- cg$pass_twin[[pc]]
+        v <- if (is.na(tw) || !tw %in% names(orow)) NA else orow[[tw]]
+        if (!is.na(v) && v == -9999) v <- NA
+        res[[pc]] <- v
+      }
+    }
   }
 
   # Rule 3a/3b/3c: SUB_AREA-weighted means (NA-aware), vectorized over columns
   if (length(cg$wmean)) {
     M <- as.matrix(sub[, cg$wmean, with = FALSE]) * 1.0
     M[M == -9999] <- NA_real_                           # HydroATLAS NoData sentinel (e.g. sgr_dk_sav)
-    num <- colSums(M * w, na.rm = TRUE)
-    den <- colSums((!is.na(M)) * w, na.rm = TRUE)   # na.rm guards NA SUB_AREA weights
-    wm  <- num / den
+    if (local_only) {
+      wm <- if (nrow(M)) M[1L, ] else rep(NA_real_, length(cg$wmean))   # the basin's own value, exactly
+    } else {
+      num <- colSums(M * w, na.rm = TRUE)
+      den <- colSums((!is.na(M)) * w, na.rm = TRUE)   # na.rm guards NA SUB_AREA weights
+      wm  <- num / den
+    }
     wm[!is.finite(wm)] <- NA_real_
     res[cg$wmean] <- as.list(wm)
   }
@@ -263,16 +294,20 @@ aggregate_one_outlet <- function(outlet, members, attr_dt, cg) {
     dd <- data.table(code = sub[[cm]], a = w)[!is.na(code) & code >= 0 & !is.na(a)]
     res[[cm]] <- if (nrow(dd)) dd[, .(a = sum(a)), by = code][order(-a)]$code[1L] else NA_integer_
   }
-  # Rule 3f (upstream fractions): dominant class from the outlet's _u fractions.
+  # Rule 3f (upstream fractions): dominant class from the outlet's _u fractions
+  # (its own _s fractions under the containing-subbasin rule).
   # Class code is read from the column name (robust if a fraction col is absent).
   for (cm in names(cg$maj_ufrac)) {
-    fcols <- intersect(cg$maj_ufrac[[cm]], names(sub))
+    fc0 <- cg$maj_ufrac[[cm]]
+    if (local_only) fc0 <- sub("_u([0-9]{2})$", "_s\\1", fc0)
+    fcols <- intersect(fc0, names(sub))
     fr <- if (nrow(orow) && length(fcols)) as.numeric(orow[, fcols, with = FALSE]) else NA_real_
+    fr[!is.na(fr) & fr == -9999] <- NA_real_
     if (all(is.na(fr)) || max(fr, na.rm = TRUE) <= 0) {   # no class present -> NA (not class 1)
       res[[cm]] <- NA_integer_; res[[paste0(cm, "_frac")]] <- NA_real_
     } else {
       i <- which.max(fr)
-      res[[cm]] <- as.integer(sub("^.*_u", "", fcols[i]))
+      res[[cm]] <- as.integer(sub("^.*_[us]", "", fcols[i]))
       res[[paste0(cm, "_frac")]] <- fr[i]
     }
   }
@@ -296,6 +331,89 @@ aggregate_hydroatlas_per_outlet <- function(attr_dt, upstream_members, rule_tabl
 }
 
 # =============================================================================
+# 5b. CONTAINING-SUBBASIN RULE  (user decisions 2026-11-19)
+# =============================================================================
+#' A gage whose containing level-12 subbasin c is NOT a HydroBASINS headwater (some subbasin has
+#' NEXT_DOWN = c) and whose SUB_AREA(c) exceeds `ratio` x the official (agency) polygon area is a small
+#' gage inside a through-flow subbasin: it gets c ALONE (aggregate_one_outlet(local_only = TRUE)) instead
+#' of c plus everything upstream. Every other gage -- including gages in headwater subbasins -- keeps the
+#' upstream aggregation unchanged. Rows are overwritten per GAGE: an outlet can be shared by gages on both
+#' sides of the rule. Adds `assignment_method` (upstream / containing_subbasin_only).
+#'
+#' hb_topology:   data.table(hybas_chr, next_down_chr, SUB_AREA) for every level-12 unit
+#' official_area: data.table(canon_id, official_area_km2) for the gages with an agency outline
+#'                (geom_area_km2 of the gagesii / wsc_eccc polygons; docs/benchmarks/hydroatlas_assignment_audit.py)
+apply_containing_subbasin_rule <- function(gage_dt, attr_dt, rule_table, hb_topology, official_area, ratio = 1.5) {
+  g <- data.table::copy(data.table::as.data.table(gage_dt))
+  g[, Downstream_HB_ID := as.character(Downstream_HB_ID)]
+  cg <- .prep_col_groups(rule_table)
+  if (!identical(data.table::key(attr_dt), "hybas_chr")) setkey(attr_dt, hybas_chr)
+  stopifnot(all(is.finite(official_area$official_area_km2) & official_area$official_area_km2 > 0),
+            !anyDuplicated(canonical_gage_id(official_area$canon_id)))
+  oa <- as.numeric(official_area$official_area_km2)[match(canonical_gage_id(g$gage_id),
+                                                          canonical_gage_id(official_area$canon_id))]
+  ci <- match(g$Downstream_HB_ID, hb_topology$hybas_chr)
+  c_sub <- as.numeric(hb_topology$SUB_AREA)[ci]
+  headwater <- !(g$Downstream_HB_ID %in% hb_topology$next_down_chr)
+  fire <- !is.na(ci) & !headwater & is.finite(oa) & oa > 0 & c_sub > ratio * oa
+  idx <- which(fire)
+  if (length(idx)) {
+    cs <- unique(g$Downstream_HB_ID[idx])
+    loc <- data.table::rbindlist(lapply(cs, function(o) aggregate_one_outlet(o, o, attr_dt, cg, local_only = TRUE)),
+                                 fill = TRUE)
+    m <- match(g$Downstream_HB_ID[idx], loc$outlet_HYBAS_ID)
+    stopifnot(!anyNA(m))
+    for (col in setdiff(intersect(names(loc), names(g)), "outlet_HYBAS_ID")) {
+      v <- loc[[col]][m]
+      if (is.integer(g[[col]])) {            # keep the column type (an all-NA column arrives as logical)
+        stopifnot(all(is.na(v) | v == round(v)))
+        v <- as.integer(v)
+      } else if (is.double(g[[col]])) {
+        v <- as.numeric(v)
+      }
+      data.table::set(g, i = idx, j = col, value = v)
+    }
+    if (all(c("watershed_area_rel_diff", "basin_area", "watershed_area_sum_SUB_AREA") %in% names(g)))
+      g[idx, watershed_area_rel_diff := data.table::fifelse(
+        is.finite(basin_area) & basin_area > 0,
+        abs(watershed_area_sum_SUB_AREA - basin_area) / basin_area, NA_real_)]
+  }
+  g[, assignment_method := data.table::fifelse(fire, "containing_subbasin_only", "upstream")]
+  .order_lead_cols(g)
+}
+
+#' Attach `assignment_flag` (ok / topology_defect / no_official_polygon) from the topology audit
+#' (docs/benchmarks/hydroatlas_assignment_audit.py), joined on the zero-stripped gage id.
+#' The audit must describe THIS table: the same outlet (Downstream_HB_ID) and the same assignment_method for every
+#' gage -- a table rebuilt from changed coordinates or metadata needs a fresh audit, never stale flags.
+attach_assignment_flags <- function(gage_dt, audit) {
+  g <- data.table::copy(data.table::as.data.table(gage_dt))
+  if (anyDuplicated(canonical_gage_id(audit$canon_id))) stop("the audit table repeats a gage id")
+  i <- match(canonical_gage_id(g$gage_id), canonical_gage_id(audit$canon_id))
+  if (anyNA(i)) stop(sum(is.na(i)), " gages are absent from the audit table")
+  bad_out <- as.character(audit$Downstream_HB_ID)[i] != as.character(g$Downstream_HB_ID)
+  if (any(bad_out)) stop(sum(bad_out), " gages have a different outlet in the audit table: re-run the audit tool on this table")
+  if ("assignment_method" %in% names(g)) {
+    bad_m <- as.character(audit$assignment_method)[i] != g$assignment_method
+    if (any(bad_m)) stop(sum(bad_m), " gages where the R rule and the audit tool disagree")
+  }
+  f <- as.character(audit$assignment_flag)[i]
+  if (anyNA(f)) stop(sum(is.na(f)), " gages have no assignment_flag in the audit table")
+  g[, assignment_flag := f]
+  .order_lead_cols(g)
+}
+
+.lead_cols <- c("gage_id", "latitude", "longitude", "basin_area", "gage_type",
+                "Downstream_HB_ID", "n_member_basins", "watershed_area_sum_SUB_AREA",
+                "outlet_UP_AREA", "watershed_area_rel_diff", "outlet_ORDER",
+                "outlet_ENDO", "outlet_COAST", "assignment_method", "assignment_flag")
+.order_lead_cols <- function(dt) {
+  lead <- intersect(.lead_cols, names(dt))
+  setcolorder(dt, c(lead, setdiff(names(dt), lead)))
+  dt[]
+}
+
+# =============================================================================
 # 6. ASSEMBLE PER-GAGE  +  WRITE  +  DICTIONARY  +  JOIN HELPER
 # =============================================================================
 assemble_gage_hydroatlas <- function(metadata_dt, gage2outlet, outlet_agg) {
@@ -312,12 +430,7 @@ assemble_gage_hydroatlas <- function(metadata_dt, gage2outlet, outlet_agg) {
     out[, watershed_area_rel_diff := data.table::fifelse(
       is.finite(basin_area) & basin_area > 0,
       abs(watershed_area_sum_SUB_AREA - basin_area) / basin_area, NA_real_)]
-  lead <- intersect(c("gage_id", "latitude", "longitude", "basin_area", "gage_type",
-                      "Downstream_HB_ID", "n_member_basins", "watershed_area_sum_SUB_AREA",
-                      "outlet_UP_AREA", "watershed_area_rel_diff", "outlet_ORDER",
-                      "outlet_ENDO", "outlet_COAST"),
-                    names(out))
-  setcolorder(out, c(lead, setdiff(names(out), lead)))
+  .order_lead_cols(out)
   out[, gage_id := as.character(gage_id)]
   out[]
 }
@@ -343,11 +456,12 @@ assemble_gage_hydroatlas <- function(metadata_dt, gage2outlet, outlet_agg) {
   slt = "Soil silt fraction (%)", snd = "Soil sand fraction (%)",
   soc = "Soil organic carbon (tonnes/ha)", swc = "Soil water content (%)",
   lit = "Lithological class", kar = "Karst-area extent (%)",
-  ero = "Soil erosion (kg/m2/yr x?)", pop = "Population count",
+  ero = "Soil erosion (kg/hectare per year; GloSEM v1.2 RUSLE-based estimate for year 2012)", pop = "Population count",
   ppd = "Population density (people/km2)", urb = "Urban extent (%)",
   nli = "Night-time lights (index)", rdd = "Road density (m/km2)",
   hft = "Human footprint index", gad = "GADM administrative area (country id)",
-  gdp = "Gross domestic product (USD)", hdi = "Human development index (x?)"
+  gdp = "Gross domestic product (USD)",
+  hdi = "Human Development Index for 2015 (index value x 1000: range 0-1000, where 1000 = HDI 1.0)"
 )
 
 #' Build a data dictionary describing every output column.
@@ -356,22 +470,28 @@ build_data_dictionary <- function(rule_table, output_cols) {
   rule_lab <- c(
     passthrough = "HydroATLAS upstream-accumulated (_u) / pour-point (_p) value at the outlet basin",
     wmean       = "area-weighted mean across upstream basins (SUB_AREA-weighted)",
-    min         = "minimum across upstream basins (true watershed low point)",
-    max         = "maximum across upstream basins (true watershed high point)",
-    majority    = "dominant class across the watershed (upstream _u fractions, or area-weighted mode)"
+    min         = "minimum across the aggregated member subbasins",
+    max         = "maximum across the aggregated member subbasins",
+    majority    = "dominant class: SUB_AREA-weighted mode across upstream member subbasins",
+    majority_ufrac = "dominant class: argmax of the outlet basin's upstream (_u) class fractions"
   )
+  # what a containing_subbasin_only row holds instead (section 5b)
+  local_lab <- "; containing_subbasin_only rows: the containing subbasin's own value"
   diag_desc <- c(
-    gage_id = "Gage identifier (USGS 8-digit zero-padded, or Canadian HYDAT station)",
+    gage_id = "Gage identifier as published by the agency (USGS site number with its leading zeros, 8 to 15 digits; or Canadian HYDAT station id); join on the zero-stripped form",
     latitude = "Gage latitude (WGS84)", longitude = "Gage longitude (WGS84)",
     basin_area = "Gage-reported drainage area (km2)", gage_type = "USGS or Canada",
     Downstream_HB_ID = "HydroBASINS lev12 outlet basin id containing the gage (read as character; 10-digit)",
-    n_member_basins = "Number of HydroBASINS units in the delineated watershed",
-    watershed_area_sum_SUB_AREA = "Sum of member SUB_AREA (km2); ~ outlet UP_AREA",
+    n_member_basins = "Number of HydroBASINS units aggregated (1 for containing_subbasin_only rows)",
+    watershed_area_sum_SUB_AREA = "Sum of member SUB_AREA (km2); ~ outlet UP_AREA for upstream rows, the containing subbasin's own area for containing_subbasin_only rows",
     outlet_UP_AREA = "HydroATLAS upstream area at the outlet basin (km2)",
-    watershed_area_rel_diff = "|sum member SUB_AREA - gage basin_area| / basin_area (gage-reported drainage as truth); high = area mismatch / mis-snapped outlet",
+    watershed_area_rel_diff = "|watershed_area_sum_SUB_AREA - gage basin_area| / basin_area (gage-reported drainage area as reference); large values mean the aggregated subbasins differ in size from the gage watershed (see assignment_flag)",
     outlet_ORDER = "Strahler stream order at the outlet basin",
-    outlet_ENDO = "Endorheic flag at outlet (0/1/2)", outlet_COAST = "Coastal flag at outlet (0/1)"
+    outlet_ENDO = "Endorheic flag at outlet (0/1/2)", outlet_COAST = "Coastal flag at outlet (0/1)",
+    assignment_method = "How the attributes were aggregated: upstream = the containing subbasin plus every subbasin upstream of it; containing_subbasin_only = the containing subbasin alone, the rule applied when that subbasin is not a HydroBASINS headwater and its area exceeds 1.5 x the gage's official polygon area (geom_area_km2 of the agency outline in the unsimplified boundary layer); every attribute is then the subbasin's own value, NA where HydroATLAS has no subbasin-level value",
+    assignment_flag = "ok; topology_defect = checked against the agency polygon, the aggregated subbasins either add land outside the watershed (beyond the containing subbasin) amounting to more than half the watershed's area, or miss more than half of the watershed -- except a gage smaller than its containing subbasin whose missed area lies mostly outside the subbasins upstream of it (a small watershed straddling a divide), which is not flagged; no_official_polygon = no agency outline to check against (HydroBASINS-fallback and excluded basins)"
   )
+  cg <- .prep_col_groups(rule_table)
   rt <- copy(rule_table)
   dict <- rbindlist(lapply(output_cols, function(col) {
     if (col %in% names(diag_desc)) {
@@ -387,8 +507,16 @@ build_data_dictionary <- function(rule_table, output_cols) {
     desc <- td[r$theme]; if (is.na(desc)) desc <- "see HydroATLAS v10 legend"
     if (grepl("_frac$", col)) {
       agg <- "areal fraction of the dominant class (0-100)"
+    } else if (r$rule == "majority" && col %in% names(cg$maj_ufrac)) {
+      agg <- paste0(rule_lab[["majority_ufrac"]],
+                    "; containing_subbasin_only rows: argmax of the containing subbasin's own (_s) class fractions")
+    } else if (r$rule == "passthrough") {
+      tw <- cg$pass_twin[[col]]
+      agg <- paste0(rule_lab[["passthrough"]],
+                    if (is.na(tw)) "; containing_subbasin_only rows: NA (HydroATLAS has no subbasin-level value)"
+                    else sprintf("%s [%s]", local_lab, tw))
     } else {
-      agg <- rule_lab[[r$rule]]
+      agg <- paste0(rule_lab[[r$rule]], local_lab)
     }
     data.table(column = col, aggregation = agg, theme = r$theme, unit = r$unit,
                description = paste0(desc, " [", r$attribute, "]"))
@@ -445,6 +573,15 @@ validate_hydroatlas_metadata <- function(gage_dt, rule_table,
   cat(sprintf("Unresolved outlet (no basin / error): %d (%.1f%%)\n",
               nrow(unresolved), 100 * nrow(unresolved) / n))
   resolved <- gage_dt[!gage_id %in% unresolved$gage_id]
+  if ("assignment_method" %in% names(gage_dt)) {
+    cat(sprintf("assignment_method: %s\n", paste(sprintf("%s=%d", names(table(gage_dt$assignment_method)),
+                                                         as.integer(table(gage_dt$assignment_method))), collapse = "  ")))
+    if ("assignment_flag" %in% names(gage_dt))
+      cat(sprintf("assignment_flag:   %s\n", paste(sprintf("%s=%d", names(table(gage_dt$assignment_flag)),
+                                                           as.integer(table(gage_dt$assignment_flag))), collapse = "  ")))
+    # checks (1) and (2) compare against the upstream accumulation: containing-subbasin rows are excluded
+    resolved <- resolved[assignment_method == "upstream"]
+  }
 
   # (1) area cross-check
   if (all(c("watershed_area_sum_SUB_AREA", "outlet_UP_AREA") %in% names(gage_dt))) {

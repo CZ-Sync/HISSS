@@ -23,6 +23,15 @@ Usage
   python docs/benchmarks/stage_hydroshare_r4_geometry.py --out ~/Downloads/Signatures_v3_28oct2026/resource4_geometry_attributes \
       [--upload ~/Downloads/hisss_R4_upload_final_2026-10-30] [--skip-gpkg]   # --skip-gpkg re-renders the README only
 
+Attribute update of 2026-11-19 (containing-subbasin rule; DECISIONS user 2026-11-19): only the attribute table, its
+dictionary and the README change. --attributes-dir takes the three rebuilt attribute files
+(run_hydroatlas_assignment_rule.R), --gpkg-from reuses the deposited unsimplified GeoPackage (APFS clone, not rebuilt),
+and --upload then holds the four files to replace:
+  python docs/benchmarks/stage_hydroshare_r4_geometry.py --out <staged dir> \
+      --aug-dir ~/Downloads/Signatures_v3_28oct2026/resource4_geometry_attributes \
+      --attributes-dir <rebuild dir> --gpkg-from ~/Downloads/Signatures_v3_28oct2026/resource4_geometry_attributes/hisss_watershed_boundaries_unsimplified.gpkg \
+      --upload ~/Downloads/hisss_watershed_geometry_upload_2026-11-19
+
 Inputs (defaults below): the August R4 staging (byte-identical to the live resource, verified by MD5 on
 2026-10-29), the full-resolution parquet, the patched gage metadata and the frozen selection lists of the
 version-3 staging, and the Daymet flags table.
@@ -42,8 +51,10 @@ DEF_AUG = f"{HOME}/Downloads/Signatures/resource4_geometry_attributes"
 DEF_FULL = f"{HOME}/HISSS_data/daymet-processed-29sep2026/polygons/watershed_polygons_fullres_large_29sep2026.parquet"
 DEF_R3 = f"{HOME}/Downloads/Signatures_v3_28oct2026/resource3_input_data"
 FULL_NAME = "hisss_watershed_boundaries_unsimplified.gpkg"
-UNCHANGED = ["hisss_hydroatlas_attributes_dictionary.csv", "hisss_watershed_boundaries_qa.csv", "hisss_watershed_boundaries.gpkg",
-             "hisss_watershed_boundaries.parquet", "hisss_watershed_hydroatlas_attributes.csv", "hisss_watershed_hydroatlas_attributes.parquet"]
+BOUNDARY_FILES = ["hisss_watershed_boundaries_qa.csv", "hisss_watershed_boundaries.gpkg", "hisss_watershed_boundaries.parquet"]
+ATTRIBUTE_FILES = ["hisss_hydroatlas_attributes_dictionary.csv", "hisss_watershed_hydroatlas_attributes.csv",
+                   "hisss_watershed_hydroatlas_attributes.parquet"]
+NO_SUBBASIN_VALUE = ["lkv_mc_usu", "rev_mc_usu", "dis_m3_pyr", "dis_m3_pmn", "dis_m3_pmx", "dor_pc_pva"]
 LARGE_KM2 = 100000
 # From the Daymet build's 2023 gate (docs/plans/2026-09-29-daymet-reprocessing-action-plan.md §2, EO_data_processing/README_DAYMET.md):
 # aggregating over the simplified Resource 4 polygons instead of the full-resolution ones moves prcp annual totals
@@ -186,8 +197,14 @@ def facts(a):
     ard = simp["area_rel_diff"].dropna().abs()
     F["area_median"], F["area_within10"], F["n_area_ref"] = float(ard.median()), float(100 * (ard <= 0.10).mean()), int(len(ard))
     # un-padded ids: boundary ids whose agency form in the attribute table differs
-    hp = pq.ParquetFile(os.path.join(a.aug_dir, "hisss_watershed_hydroatlas_attributes.parquet"))
+    adir = a.attributes_dir or a.aug_dir
+    hp = pq.ParquetFile(os.path.join(adir, "hisss_watershed_hydroatlas_attributes.parquet"))
     F["attr_cols"] = hp.schema_arrow.names
+    assert "assignment_method" in F["attr_cols"] and "assignment_flag" in F["attr_cols"], \
+        "the attribute table lacks the assignment columns (pass --attributes-dir with the rebuilt table)"
+    asg = hp.read(columns=["assignment_method", "assignment_flag"]).to_pandas()
+    F["n_method"] = {k: int(v) for k, v in asg.assignment_method.value_counts().items()}
+    F["n_flag"] = {k: int(v) for k, v in asg.assignment_flag.value_counts().items()}
     attr_ids = hp.read(columns=["gage_id"]).column("gage_id").to_pylist()
     F["n_attr"] = len(attr_ids)
     lens = sorted({len(g) for g in attr_ids if g.isdigit()})
@@ -206,7 +223,7 @@ def facts(a):
     # the CSV is a decimal export of the parquet: same rows, columns and ids; floats agree to ~1e-9 (Codex review)
     import numpy as np
     import pandas as pd
-    csvt = pd.read_csv(os.path.join(a.aug_dir, "hisss_watershed_hydroatlas_attributes.csv"), dtype={"gage_id": str}, float_precision="round_trip")
+    csvt = pd.read_csv(os.path.join(adir, "hisss_watershed_hydroatlas_attributes.csv"), dtype={"gage_id": str}, float_precision="round_trip")
     pqt = hp.read().to_pandas()
     assert list(csvt.columns) == list(pqt.columns) and len(csvt) == len(pqt) == F["n_attr"]
     assert (csvt["gage_id"].tolist() == pqt["gage_id"].astype(str).tolist())
@@ -255,10 +272,10 @@ dataset. This resource contains (1) the **watershed boundary polygons** for the 
 watersheds underlying HISSS — a simplified layer and the same outlines at full
 resolution, plus the {F['n_extra']} large basins the simplified layer omits — and (2) a
 **watershed-scale physiographic attribute table** —
-approximately 200 hydro-environmental descriptors per gage aggregated over each gage's
-full upstream contributing area from HydroATLAS (BasinATLAS v10; Linke et al. 2019),
-spanning hydrology, climate, physiography, land cover, soils and geology, and
-anthropogenic influence. All layers are keyed by `gage_id` for joins to the other HISSS
+approximately 200 hydro-environmental descriptors per gage from HydroATLAS (BasinATLAS
+v10; Linke et al. 2019), aggregated over the HydroBASINS level-12 subbasin that contains
+each gage and, for most gages, the subbasins upstream of it, and spanning hydrology,
+climate, physiography, land cover, soils and geology, and anthropogenic influence. All layers are keyed by `gage_id` for joins to the other HISSS
 resources (join on the zero-stripped form — see *Reading the data*); row coverage varies
 by product (see below).
 
@@ -347,12 +364,15 @@ One row per compiled gage ({F['n_attr']:,}). The attribute and simplified-bounda
 rows (all {F['n_attr']:,} compiled gages have one), while four US gages whose streamflow compile did
 not complete ({bo}; in neither signature product) have a boundary
 but no attribute row. The attribute and unsimplified-boundary layers overlap on {F['full_overlap']:,} gages.
-Attributes are drawn from BasinATLAS v10 over each gage's delineated upstream set of
-HydroBASINS level-12 subbasins, using a hybrid aggregation:
+Attributes are drawn from BasinATLAS v10. Each gage is assigned the HydroBASINS
+level-12 subbasin that contains its location (`Downstream_HB_ID`), and for
+{F['n_method']['upstream']:,} gages (`assignment_method` = `upstream`) the attributes are
+aggregated over that subbasin and every subbasin upstream of it, using a hybrid
+aggregation:
 
 - **Upstream-accumulated (`_u`) and pour-point (`_p`) attributes** (91) pass through
-  from the gage's outlet subbasin — HydroATLAS has already accumulated these over the
-  same upstream extent, so the outlet value is the rigorous watershed value.
+  from the containing subbasin, over whose upstream extent HydroATLAS has already
+  accumulated them.
 - **Subbasin-scale (`_s`) attributes** are re-aggregated over the member subbasins:
   area-weighted means for continuous, percentage, and monthly-climate variables
   (HydroATLAS −9999 NoData masked), spatial minimum/maximum for elevation, and
@@ -360,13 +380,39 @@ HydroBASINS level-12 subbasins, using a hybrid aggregation:
   (`_u`) class fractions for land cover (`glc`) and potential natural vegetation
   (`pnv`), and the SUB_AREA-weighted mode for the other nine categorical variables.
 
-Diagnostics include `watershed_area_rel_diff` — the relative difference between the
-summed member-subbasin area and the gage's published drainage area — for flagging
-gages whose delineated watershed diverges from the reported drainage (for example,
-mis-snapped outlets). The dictionary states the aggregation method used for every
-column; its definitions are abbreviated, and categorical class codes (for example
-land cover, potential natural vegetation, and wetland classes) are defined in the
-BasinATLAS v10 catalog rather than restated here.
+**Small gages inside through-flow subbasins** (`assignment_method` =
+`containing_subbasin_only`, {F['n_method']['containing_subbasin_only']} gages). When the containing subbasin is not a
+HydroBASINS headwater (other subbasins drain into it) and its area exceeds 1.5 times
+the gage's official polygon area (`geom_area_km2` of the agency outline in the
+unsimplified layer), the gage is treated as a small gage inside a through-flow
+subbasin: its attributes are the containing subbasin's own (`_s`) values,
+`n_member_basins` is 1, and the {len(NO_SUBBASIN_VALUE)} fields that HydroATLAS provides only as upstream
+totals or pour-point values ({', '.join(f'`{c}`' for c in NO_SUBBASIN_VALUE)}) are empty.
+The rule cannot tell such a gage from one partway down the subbasin's main stem with
+little area upstream of the subbasin; those few cases fail the assignment check below
+and are flagged. Gages in headwater subbasins keep that subbasin's values whatever
+their size.
+
+**Assignment check** (`assignment_flag`). Every gage with an official polygon was
+checked against it. `topology_defect` ({F['n_flag'].get('topology_defect', 0)} gages) marks gages whose aggregated
+subbasins either add land outside the watershed amounting to more than half of its
+area, not counting the containing subbasin itself, or miss more than half of it —
+typically gages on a tributary or a confluence branch inside their subbasin, or gages
+whose location falls in a neighbouring subbasin. A gage smaller than its containing
+subbasin whose missed area lies mostly outside the subbasins upstream of it — a small
+watershed straddling a divide into a neighbouring subbasin — is not flagged.
+`no_official_polygon`
+({F['n_flag'].get('no_official_polygon', 0)} gages) marks gages without an agency outline to check against (the
+HydroBASINS-fallback basins and `05KH009`); all other gages are `ok`. Excess area
+inside the containing subbasin is expected at level-12 resolution and is not
+flagged.
+
+Diagnostics also include `watershed_area_rel_diff` — the relative difference between
+the summed area of the aggregated subbasins and the gage's published drainage area.
+The dictionary states the aggregation method used for every column; its definitions
+are abbreviated, and categorical class codes (for example land cover, potential
+natural vegetation, and wetland classes) are defined in the BasinATLAS v10 catalog
+rather than restated here.
 
 ## Reading the data
 
@@ -400,17 +446,18 @@ in R: `key <- function(x) ifelse(grepl("^[0-9]+$", x), sub("^0+", "", x), touppe
 In both boundary layers and the QA CSV, **{len(F['unpadded'])}** long USGS site numbers are stored in
 `gage_id` without their leading zero ({unp_stored} for agency ids {unp_agency}); the `canon_id` column is the stripped key for every row and
 joins correctly. The attribute table stores all {F['n_attr']:,} ids in agency form (USGS site numbers of
-{F['usgs_id_lengths']} digits with their leading zeros — the dictionary's "8-digit" wording applies to
-most but not all of them). The boundary layers are deposited with the ids exactly as built
-rather than rewritten.
+{F['usgs_id_lengths']} digits with their leading zeros). The boundary layers are deposited with the ids
+exactly as built rather than rewritten.
 
 ## Caveats
 
 - **Subbasin granularity**: HydroBASINS level-12 subbasins average roughly 100 km²
   (ranging from a few to over 200 km²), so for gages whose watersheds are much
   smaller than their containing subbasin, attribute values describe the subbasin
-  rather than the exact watershed. Use `watershed_area_rel_diff` to screen such
-  cases.
+  (and, for `upstream` rows, the subbasins upstream of it) rather than the exact
+  watershed; pour-point fields such as natural discharge refer to the containing
+  subbasin's outlet, which can lie well downstream of a small gage. Screen with
+  `assignment_flag` and `watershed_area_rel_diff`.
 - **Area diagnostics for US gages are a consistency check, not independent
   validation** — the published drainage areas are themselves GAGES-II-derived.
 - The attribute table's source values are from HydroATLAS/BasinATLAS v10; consult the
@@ -443,10 +490,13 @@ def render_abstract(F):
         f"simplification, together with the {F['n_extra']} basins larger than {LARGE_KM2:,} km2 that the simplified layer omits ({F['n_full']:,} polygons); "
         "it is the layer over which the Daymet forcing of the harmonized-input resource was aggregated. The attribute table covers all "
         f"{F['n_attr']:,} compiled HISSS gages with {len(F['attr_cols'])} columns ({F['attr_cols'].index('dis_m3_pyr')} identifiers and diagnostics plus "
-        f"{len(F['attr_cols']) - F['attr_cols'].index('dis_m3_pyr')} HydroATLAS-derived attributes), aggregated over each gage's full upstream contributing area "
-        "from BasinATLAS v10 and spanning hydrology, climate, physiography, land cover, soils and geology, and anthropogenic influence. "
-        "Upstream-accumulated HydroATLAS attributes pass through from the outlet subbasin; subbasin-scale attributes are re-aggregated as "
-        "area-weighted means, elevation extrema, or dominant classes. A dictionary lists every attribute's definition, HydroATLAS theme and unit "
+        f"{len(F['attr_cols']) - F['attr_cols'].index('dis_m3_pyr')} HydroATLAS-derived attributes) from BasinATLAS v10, spanning hydrology, climate, "
+        "physiography, land cover, soils and geology, and anthropogenic influence. Attributes are aggregated over the HydroBASINS level-12 "
+        "subbasin containing each gage and every subbasin upstream of it, or over the containing subbasin alone for small gages inside large "
+        "through-flow subbasins. Where upstream subbasins are included, upstream-accumulated HydroATLAS attributes pass through from the "
+        "containing subbasin and subbasin-scale attributes are re-aggregated as area-weighted means, elevation extrema, or dominant classes; "
+        "otherwise the containing subbasin's own values are used. Each row records how it was aggregated and whether "
+        "the assignment passed a check against the agency polygon. A dictionary lists every attribute's definition, HydroATLAS theme and unit "
         "codes, and aggregation method. The deposited simplified layer is an August 2026 reconstruction of the original June 2026 layer from the "
         "project's committed workflow and the same source products, validated to match every recorded property of the original (see README for "
         "provenance). All layers are keyed by gage_id for joins to the other HISSS resources (join on the zero-stripped identifier, as the README "
@@ -463,10 +513,17 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--upload", default=None)
     ap.add_argument("--skip-gpkg", action="store_true", help="reuse an existing GeoPackage in --out (README re-render)")
+    ap.add_argument("--attributes-dir", default=None,
+                    help="the rebuilt attribute table + dictionary (run_hydroatlas_assignment_rule.R); default: --aug-dir")
+    ap.add_argument("--gpkg-from", default=None, help="copy this deposited unsimplified GeoPackage instead of building it")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     gpkg = os.path.join(a.out, FULL_NAME)
-    if a.skip_gpkg:
+    if a.gpkg_from:
+        copy(a.gpkg_from, gpkg)
+        g = {"n": "(copied)", "wkb_identical": "(copied)", "n_not_multi": "?", "valid": "?"}
+        print(f"GeoPackage copied unchanged from {a.gpkg_from}")
+    elif a.skip_gpkg:
         assert os.path.exists(gpkg), gpkg
         g = {"n": "(reused)", "wkb_identical": "(reused)", "n_not_multi": "?", "valid": "?"}
     else:
@@ -475,8 +532,11 @@ def main():
               f"{g['valid']} valid, {g['n_not_multi']} non-multipolygon")
     F = facts(a)
     manifest = []
-    for name in UNCHANGED:
+    for name in BOUNDARY_FILES:
         manifest.append(copy(os.path.join(a.aug_dir, name), os.path.join(a.out, name)))
+    for name in ATTRIBUTE_FILES:
+        o, d = copy(os.path.join(a.attributes_dir or a.aug_dir, name), os.path.join(a.out, name))
+        manifest.append((o + (" (run_hydroatlas_assignment_rule.R)" if a.attributes_dir else ""), d))
     manifest.append((os.path.basename(a.full_parquet) + " (as GeoPackage)", FULL_NAME))
     readme = render_readme(F, os.path.getsize(gpkg))
     with open(os.path.join(a.out, "hisss_readme_geometry_attributes.md"), "w") as f:
@@ -507,7 +567,29 @@ def main():
           f"attr {F['n_attr']:,}×{len(F['attr_cols'])}; overlap {F['overlap']:,} / attr-only {F['attr_only']} / bound-only {F['bound_only']} "
           f"status {F['bound_only_status']} agency {F['bound_only_agency']}; full overlap {F['full_overlap']:,}; unpadded {len(F['unpadded'])}; "
           f"products with boundary {F['sel_with_simp']} (full {F['sel_with_full']}); exact-join deficit {F['sel_exact_simp']}; Daymet flags {F['n_flags']} (lc {F['flags_lc']})")
-    if a.upload:
+    print(f"attribute table: assignment_method {F['n_method']}; assignment_flag {F['n_flag']}")
+    if a.upload and a.attributes_dir:
+        # attribute update (2026-11-19): replace the three attribute files and the README; the rest stays
+        os.makedirs(a.upload, exist_ok=True)
+        up = []
+        for name in ATTRIBUTE_FILES + ["hisss_readme_geometry_attributes.md"]:
+            copy(os.path.join(a.out, name), os.path.join(a.upload, name))
+            p = os.path.join(a.upload, name)
+            up.append((name, os.path.getsize(p), md5(p)))
+        note = os.path.join(os.path.dirname(a.upload.rstrip("/")), os.path.basename(a.upload.rstrip("/")) + "_METADATA_and_MD5.txt")
+        with open(note, "w") as f:
+            f.write("HISSS Watershed Geometry and Basin Attributes — attribute-table update of "
+                    f"{dt.date.today().isoformat()} (containing-subbasin rule; DECISIONS user 2026-11-19)\n")
+            f.write("Resource: https://www.hydroshare.org/resource/1283981f7f6a451a91f745902256443e/\n\n")
+            f.write("TITLE: keep as is.\n\nABSTRACT (replace):\n" + render_abstract(F) + "\n")
+            f.write("KEYWORDS: keep. COVERAGE / LICENSE (CC-BY 4.0): keep.\n\n")
+            f.write("FILES TO UPLOAD (from this folder) — each REPLACES the existing file of the same name:\n")
+            for n, b, m in up:
+                f.write(f"  {n}  {b:,} bytes  md5 {m}\n")
+            f.write("\nThe four boundary files (simplified GeoPackage, GeoParquet, QA CSV, unsimplified GeoPackage) stay as they are.\n")
+            f.write("After upload, compare the MD5 HydroShare shows for each file with the values above.\n")
+        print(f"upload folder {a.upload} ({len(up)} files) + note {note}")
+    elif a.upload:
         os.makedirs(a.upload, exist_ok=True)
         up = []
         for name in ("hisss_readme_geometry_attributes.md", FULL_NAME):

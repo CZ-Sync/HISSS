@@ -266,6 +266,7 @@ Watershed metadata is automatically enriched with human interference indicators:
 ├── run_ingest_usgs_hydat.R        # Raw USGS/HYDAT data ingestion (R)
 ├── run_caravan_processing.R       # Caravan processing (R)
 ├── run_hydroatlas_metadata.R      # Per-gage HydroATLAS watershed metadata (R)
+├── run_hydroatlas_assignment_rule.R  # Containing-subbasin rule on an existing HydroATLAS table (R, no sf)
 └── R/                             # Legacy R (deprecated for signatures; ingestion utilities active)
 ```
 
@@ -278,7 +279,7 @@ Watershed metadata is automatically enriched with human interference indicators:
 | Daymet V4 | ORNL DAAC; basin-aggregated | Precipitation, temperature, SWE (1 km) |
 | Caravan | NetCDF bundles | Alternative pipeline: streamflow + climate |
 | GAGES-II / WSC | USGS ScienceBase; ECCC | Watershed boundaries, disturbance metadata |
-| HydroATLAS v10 | BasinATLAS | Static watershed attributes (~211 columns) |
+| HydroATLAS v10 | BasinATLAS | Static watershed attributes (213 columns) |
 
 See `docs/DATA_SOURCES.md` for the complete inventory.
 

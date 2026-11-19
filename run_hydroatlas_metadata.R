@@ -13,10 +13,18 @@
 #   Rscript run_hydroatlas_metadata.R --subset 40     # dry-run, 40 spread gages -> test_output/
 #   Rscript run_hydroatlas_metadata.R --status all    # all gages with valid coords
 #   Rscript run_hydroatlas_metadata.R --metadata <path/to/combined_watershed_metadata.csv>
+#   ... --assignment-audit <hydroatlas_assignment_audit.csv>   # REQUIRED for a product build
+#   ... --no-assignment-rule                                   # pre-rule table (input to the audit tool)
+#
+# Containing-subbasin rule (user decisions 2026-11-19; section 5b of R/aggregate_hydroatlas_metadata.R):
+# a gage whose containing subbasin is not a HydroBASINS headwater and is more than 1.5 x the gage's
+# official polygon area gets that subbasin alone. The official areas and the topology flags come from
+# docs/benchmarks/hydroatlas_assignment_audit.py (run it on the --no-assignment-rule output, or on the
+# deposited table when the outlets are unchanged). To re-apply the rule to an existing table without the
+# spatial steps (no sf), use run_hydroatlas_assignment_rule.R.
 #
 # Prerequisites: HYDROATLAS_GPKG (config.R), upstream_hydrobasins.rds (repo root),
-#   a combined_watershed_metadata*.csv (auto-located: PARQUET_DATA_DIR,
-#   combined_streamflow_output/, data_out/ — newest by mtime).
+#   the pinned combined_streamflow_output/combined_watershed_metadata_19feb2026.csv (or --metadata).
 ################################################################################
 
 t0 <- Sys.time()
@@ -33,6 +41,11 @@ get_arg <- function(flag, default = NULL) {
 subset_n <- suppressWarnings(as.integer(get_arg("--subset", NA)))
 status_filter <- get_arg("--status", "success")
 metadata_override <- get_arg("--metadata", NA)
+assignment_audit <- get_arg("--assignment-audit", NA)
+no_rule <- "--no-assignment-rule" %in% args
+if (is.na(assignment_audit) && !no_rule)
+  stop("pass --assignment-audit <hydroatlas_assignment_audit.csv> (docs/benchmarks/hydroatlas_assignment_audit.py), ",
+       "or --no-assignment-rule for the pre-rule table")
 
 is_dry  <- !is.na(subset_n)
 out_dir <- if (is_dry) "test_output" else "data_out"
@@ -46,23 +59,11 @@ cat("Start:", format(t0, "%Y-%m-%d %H:%M:%S"),
     "| status:", status_filter, "| out:", out_dir, "\n")
 
 # ---- locate metadata ----
-if (!is.na(metadata_override)) {
-  metadata_path <- metadata_override
-} else {
-  search_dirs <- c(PARQUET_DATA_DIR, "combined_streamflow_output", "data_out")
-  cands <- unlist(lapply(search_dirs, function(d)
-    if (dir.exists(d)) list.files(d, "^combined_watershed_metadata.*\\.csv$", full.names = TRUE)
-    else character(0)))
-  if (!length(cands)) stop("No combined_watershed_metadata*.csv found in: ",
-                           paste(search_dirs, collapse = ", "))
-  # Prefer the date embedded in the filename (e.g. 19feb2026); fall back to mtime
-  # (copy timestamps on D: can be misleading).
-  fdate <- vapply(basename(cands), function(b) {
-    g <- regmatches(b, regexpr("[0-9]{1,2}[a-z]{3}[0-9]{4}", b, ignore.case = TRUE))
-    if (length(g)) suppressWarnings(as.numeric(as.Date(g, format = "%d%b%Y"))) else NA_real_
-  }, numeric(1))
-  metadata_path <- if (any(!is.na(fdate))) cands[which.max(fdate)] else cands[which.max(file.mtime(cands))]
-}
+# PINNED (plan 2026-11-19): the 8,014-gage compile behind every 2026 product; no newest-file selection.
+# Pass --metadata explicitly for any other compile (and re-run the audit tool for it).
+PINNED_METADATA <- "combined_streamflow_output/combined_watershed_metadata_19feb2026.csv"
+metadata_path <- if (!is.na(metadata_override)) metadata_override else PINNED_METADATA
+if (!file.exists(metadata_path)) stop("metadata not found: ", metadata_path, " (pass --metadata <path>)")
 cat("Metadata:", metadata_path, "\n")
 stopifnot(file.exists(metadata_path), file.exists(HYDROATLAS_GPKG))
 
@@ -107,6 +108,7 @@ cat(sprintf("  outlets: %d | unique member basins: %d | from cache: %d\n",
 # ---- attribute table (subset to members; cache parquet) ----
 attr_cache <- file.path(out_dir, sprintf("hydroatlas_member_attrs_%s.parquet", date_tag))
 attr_dt <- load_hydroatlas_attributes(HB_dt, member_union, rule_table$attribute, cache_path = attr_cache)
+hb_topology <- HB_dt[, .(hybas_chr = as_hybas_chr(HYBAS_ID), next_down_chr = as_hybas_chr(NEXT_DOWN), SUB_AREA)]
 rm(HB_dt); gc()
 cat(sprintf("Attribute table: %d basins x %d cols  (cached: %s)\n",
             nrow(attr_dt), ncol(attr_dt), attr_cache))
@@ -115,6 +117,13 @@ cat(sprintf("Attribute table: %d basins x %d cols  (cached: %s)\n",
 cat("Aggregating per outlet...\n")
 outlet_agg <- aggregate_hydroatlas_per_outlet(attr_dt, upstream_members, rule_table, outlet_ids)
 gage_dt <- assemble_gage_hydroatlas(md, gage2outlet, outlet_agg)
+if (!no_rule) {
+  audit <- fread(assignment_audit, colClasses = c(canon_id = "character", gage_id = "character",
+                                                  Downstream_HB_ID = "character"))
+  gage_dt <- apply_containing_subbasin_rule(gage_dt, attr_dt, rule_table, hb_topology,
+                                            audit[!is.na(official_area_km2), .(canon_id, official_area_km2)])
+  gage_dt <- attach_assignment_flags(gage_dt, audit)
+}
 
 # ---- validate + write ----
 validate_hydroatlas_metadata(gage_dt, rule_table, attr_dt, upstream_members)

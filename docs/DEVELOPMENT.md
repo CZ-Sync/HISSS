@@ -429,9 +429,11 @@ Rscript run_hydroatlas_metadata.R                 # full run (success gages) -> 
 Rscript run_hydroatlas_metadata.R --subset 40     # dry-run on 40 spread gages -> test_output/
 Rscript run_hydroatlas_metadata.R --status all    # all gages with valid coordinates
 Rscript run_hydroatlas_metadata.R --metadata <path/to/combined_watershed_metadata.csv>
+# every product build also passes --assignment-audit <hydroatlas_assignment_audit.csv> (step 4 below),
+# or --no-assignment-rule for the pre-rule table that the audit tool reads
 ```
 
-Outputs (in `data_out/`): `watershed_hydroatlas_metadata_{date}.csv` + `.parquet` (~211
+Outputs (in `data_out/`): `watershed_hydroatlas_metadata_{date}.csv` + `.parquet` (213
 columns, one row per gage), `watershed_hydroatlas_metadata_dictionary.csv`
 (column → theme / unit / aggregation / description), and a reusable
 `hydroatlas_member_attrs_{date}.parquet` attribute cache. `combined_watershed_metadata.csv`
@@ -446,16 +448,35 @@ is left untouched.
    `upstream_hydrobasins.rds` (keyed by outlet HYBAS_ID); outlets not yet cached are filled
    via a `NEXT_DOWN` BFS over the topology.
 3. **aggregate (hybrid)** — rules built programmatically by `classify_hydroatlas_attributes()`:
-   - `_u` / `_p` attributes (91): **passthrough** from the outlet basin. The delineated
-     upstream set equals the extent HydroATLAS already accumulates into the outlet basin's
-     `_u` fields, so this is the rigorous watershed value (no re-aggregation).
+   - `_u` / `_p` attributes (91): **passthrough** from the outlet basin (the subbasin
+     containing the gage). The delineated upstream set equals the extent HydroATLAS already
+     accumulates into that basin's `_u` fields (no re-aggregation).
    - `_s`-only attributes (105): **SUB_AREA-weighted** — area-weighted mean for continuous,
      percentage, and monthly-climate fields (HydroATLAS `-9999` NoData masked; percentages
      always mean, never max); spatial **min/max** for elevation only; area-weighted
      **majority** for categoricals (glc/pnv via argmax of the outlet's upstream `_u` fractions;
      wet and the other 8 via area-weighted mode of the source class).
    - `_s` attributes that have a `_u` twin (85) are dropped in favor of the `_u` value.
-4. **assemble + write** — one row per gage, keyed by zero-padded `gage_id`. Join to the
+4. **containing-subbasin rule** (DECISIONS, user 2026-11-19; record
+   `docs/plans/2026-11-19-hydroatlas-outlet-review/`) — `apply_containing_subbasin_rule()`: a
+   gage whose containing subbasin is NOT a HydroBASINS headwater (some unit has `NEXT_DOWN` =
+   it) and is more than 1.5 × the gage's official (agency) polygon area gets that subbasin
+   ALONE (`aggregate_one_outlet(local_only = TRUE)`): its own `_s` values, `n_member_basins` 1,
+   NA for the six fields with no subbasin-level version (`lkv_mc_usu`, `rev_mc_usu`,
+   `dis_m3_p*`, `dor_pc_pva`). Rows are overwritten per gage (outlets are shared across the
+   rule). Headwater gages keep the upstream aggregation whatever their size. Columns
+   `assignment_method` (upstream / containing_subbasin_only) and `assignment_flag`
+   (ok / topology_defect / no_official_polygon) follow `outlet_COAST`. The official areas and
+   the flags come from `docs/benchmarks/hydroatlas_assignment_audit.py` (Python, ~40 min: the
+   agency polygons overlaid on the level-12 units in ESRI:102008; defect = more than half the
+   watershed's area of land outside it beyond the containing subbasin, or more than half the
+   watershed missed, with small divide-straddling gages exempt; never IoU).
+   `run_hydroatlas_assignment_rule.R` applies the rule to an existing table without the
+   spatial steps (no `sf`), and `docs/benchmarks/check_hydroatlas_assignment_rebuild.py` is
+   the gate against the deposited table. 2026-11-19 result: 511 rows changed, the other
+   7,503 identical in all 211 deposited columns; flags 321 topology_defect / 31
+   no_official_polygon (topology defects 809 → 321, none newly created).
+5. **assemble + write** — one row per gage, keyed by zero-padded `gage_id`. Join to the
    signatures with `join_hydroatlas_to_signatures()` (leading-zero-safe canonical matching).
 
 ### Memory / size
@@ -467,7 +488,7 @@ CSV — all artifacts stay far under 1 GB.
 
 Config/source: `HYDROATLAS_GPKG` in `config.R`; module `R/aggregate_hydroatlas_metadata.R`;
 entry `run_hydroatlas_metadata.R`. Validation (`validate_hydroatlas_metadata()`) cross-checks
-member area vs. outlet `UP_AREA` and area-weighted `_s` vs. HydroATLAS `_u`.
+member area vs. outlet `UP_AREA` and area-weighted `_s` vs. HydroATLAS `_u` (upstream rows only).
 
 ## Static HTML Explorer
 

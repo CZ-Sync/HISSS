@@ -32,8 +32,9 @@ loads every session is `docs/STATUS.md`.
   - [ ] Mann–Kendall tie correction double-counts a tie group holding both −0.0 and +0.0 (`julia/src/stats.jl`,
     `unique` vs `count(==)`); 13 / 14 deposited series, mostly `elasticity_annual`, tau off < 0.01. Same root
     cause as the storage year-gate −0.0 item — fix both by normalising −0.0 to +0.0 on input.
-  - [ ] HydroATLAS attributes of mis-snapped outlets (36 gages ≤ 100 km² aggregated over > 100,000 km²; 2,020 rows
-    with `watershed_area_rel_diff` > 0.5): re-snap or mark the rows unusable; state the scale in the readme.
+  - [x] ~~HydroATLAS attributes of mis-snapped outlets (36 gages ≤ 100 km² aggregated over > 100,000 km²; 2,020 rows
+    with `watershed_area_rel_diff` > 0.5)~~ — SUPERSEDED 2026-11-19 by the containing-subbasin rule and the
+    `assignment_flag` column ([November 2026]; the 36 / 2,020 framing was wrong — see that entry).
   Deposited text (re-render + re-upload):
   - [ ] HydroATLAS dictionary: scale factors of `lka_pc_use`, `dor_pc_pva` (% ×10), `pop_ct_usu` (thousands),
     `nli_ix_uav` (×100), `hft_ix_u93/u09` (×10); GDP total vs per capita (2011 int. USD PPP, 2015);
@@ -396,6 +397,51 @@ loads every session is `docs/STATUS.md`.
 Moved 2026-09-29 to `docs/reconciliation/guidelines_todos.md` and
 `docs/reconciliation/manuscript_log.md` (dated entries, newest first, maintained by the
 `/sync-docs` skill). This file no longer carries them.
+
+---
+
+## [November 2026]
+
+### Fixed: HydroATLAS attribute assignment — the containing-subbasin rule (MEDIUM; 2026-11-19)
+
+Found 2026-11-18 while answering a colleague's join question: `map_gages_to_outlets()` gives each gage the
+level-12 subbasin that contains its point and aggregates that subbasin plus everything upstream of it, with no
+area check, so a small creek inside a large through-flow subbasin inherited the whole upstream river network.
+Scored by topology against the agency polygons (never IoU), 809 of the 7,983 gages with an agency polygon were
+wrong (643 in the WY1993–2025 product, 557 in the WY1980–2025 product). The streamflow signatures, Daymet,
+MODIS and NLCD products used the agency polygons and are not affected.
+
+DECISIONS (user, 2026-11-19):
+- **Acceptance standard.** HydroBASINS level-12 is the unit of analysis. Headwater gages smaller than their
+  subbasin, gages partway down a subbasin's main stem, and small gages whose watershed straddles a divide are
+  correct by design; only topology errors (inherited land that does not drain to the gage, or most of the
+  watershed missed) are defects.
+- **Rule.** A gage whose containing subbasin is not a HydroBASINS headwater and is more than 1.5 × its official
+  (agency) polygon area gets that subbasin ALONE: its own `_s` values, NA for the six fields HydroATLAS provides
+  only as upstream totals or pour-point values. Every other gage, including gages in headwater subbasins, keeps
+  its deposited row. No snapping and no under-assignment rule ("simplicity and transparency is valued over an
+  overly complex over-engineered solution"); the remaining wrong gages are flagged.
+- The HydroBASINS-fallback polygons are not rebuilt (already `low_confidence`). The Harmonized Input Data,
+  both signature products and Vegetation and Land Cover are untouched. One documentation pass.
+
+Result: 511 rows changed (424 / 352 in the two products); the other 7,503 are identical to the deposit in all
+211 columns (parquet values and CSV cells). Topology defects 809 → 321 (488 fixed, none created). Two new columns
+after `outlet_COAST`: `assignment_method` (upstream 7,503 / containing_subbasin_only 511) and `assignment_flag`
+(ok 7,662 / topology_defect 321 / no_official_polygon 31), so 213 columns. Dictionary: 2 new rows, the rule noted
+on every aggregation label, the `gage_id` row's "8-digit zero-padded" fixed, `watershed_area_rel_diff` reworded.
+Code: `R/aggregate_hydroatlas_metadata.R` (§5b `apply_containing_subbasin_rule()`, `attach_assignment_flags()`,
+`aggregate_one_outlet(local_only = TRUE)`, `sf` optional, the dictionary builder synced with the deposited text),
+`run_hydroatlas_metadata.R` (`--assignment-audit` / `--no-assignment-rule`), new `run_hydroatlas_assignment_rule.R`
+(the rule on an existing table, no `sf`), new `docs/benchmarks/hydroatlas_assignment_audit.py` (official areas,
+BasinATLAS attribute extract, topology audit and flags; Python decision = R decision on all 8,014 gages), new
+gate `docs/benchmarks/check_hydroatlas_assignment_rebuild.py` (ALL PASS, incl. an independent re-derivation of
+the 511 rows from BasinATLAS), `docs/benchmarks/stage_hydroshare_r4_geometry.py` (`--attributes-dir`,
+`--gpkg-from`; README and abstract describe the rule and the flags). Run folder
+`~/HISSS_data/hydroatlas-assignment-fix-19nov2026/`; upload set `~/Downloads/hisss_watershed_geometry_upload_2026-11-19/`
+(attribute CSV + parquet, dictionary, README) + `_METADATA_and_MD5.txt` — NOT uploaded yet. Plan, reviews (Codex and
+Antigravity, four rounds) and the audit table: `docs/plans/2026-11-19-hydroatlas-outlet-review/`. Manuscript
+lines to change (§2 l.49, §2.1.4, Table 3, §3 Resource 4, §6 join sentence): addendum of
+`docs/reconciliation/2026-10-30-coauthor-relay.md`.
 
 ---
 
